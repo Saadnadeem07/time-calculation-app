@@ -6,6 +6,12 @@ const MONTHS = [
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
 ]
 
+const STATUS_OPTIONS = [
+  { value: 'working', label: 'Working' },
+  { value: 'leave', label: 'Leave' },
+  { value: 'off', label: 'Off' }
+]
+
 // Parse flexible time formats (9:30 AM, 09:30, 9:30, 21:30, etc.)
 function parseTime(timeString) {
   if (!timeString || !timeString.trim()) return null
@@ -40,6 +46,12 @@ function parseTime(timeString) {
   }
   
   return null
+}
+
+// Check if a date is a weekend (Saturday or Sunday)
+function isWeekend(date) {
+  const dayOfWeek = date.getDay()
+  return dayOfWeek === 0 || dayOfWeek === 6 // 0 = Sunday, 6 = Saturday
 }
 
 // Generate date range from 26th of previous month to 25th of selected month
@@ -93,9 +105,20 @@ function App() {
         dates.forEach(date => {
           const dateKey = date.toISOString().split('T')[0]
           if (!newEntries[dateKey]) {
+            // Automatically set weekends as 'off', others as 'working'
+            const status = isWeekend(date) ? 'off' : 'working'
             newEntries[dateKey] = {
               timeIn: '9:30 AM',
-              timeOut: '6:30 PM'
+              timeOut: '6:30 PM',
+              status: status
+            }
+          } else {
+            // Ensure existing entries have status field, preserve existing status unless it's a weekend
+            if (!newEntries[dateKey].status) {
+              newEntries[dateKey].status = isWeekend(date) ? 'off' : 'working'
+            } else if (isWeekend(date) && newEntries[dateKey].status !== 'off') {
+              // Force weekends to be 'off'
+              newEntries[dateKey].status = 'off'
             }
           }
         })
@@ -115,10 +138,26 @@ function App() {
     }))
   }
 
+  // Update status entry
+  const updateStatus = (dateKey, status) => {
+    setDateEntries(prev => ({
+      ...prev,
+      [dateKey]: {
+        ...prev[dateKey],
+        status: status
+      }
+    }))
+  }
+
   // Calculate metrics for a single day
   const calculateDayMetrics = (dateKey) => {
     const entry = dateEntries[dateKey]
     if (!entry) return { minutesLate: 0, minutesEarly: 0, workingHours: 0 }
+
+    // Skip calculations for 'off' and 'leave' days
+    if (entry.status === 'off' || entry.status === 'leave') {
+      return { minutesLate: 0, minutesEarly: 0, workingHours: 0 }
+    }
 
     const timeIn = parseTime(entry.timeIn)
     const timeOut = parseTime(entry.timeOut)
@@ -155,24 +194,47 @@ function App() {
   const totals = useMemo(() => {
     let totalMinutesLate = 0
     let totalMinutesEarly = 0
+    let leaveCount = 0
 
     dates.forEach(date => {
       const dateKey = date.toISOString().split('T')[0]
-      const metrics = calculateDayMetrics(dateKey)
-      totalMinutesLate += metrics.minutesLate
-      totalMinutesEarly += metrics.minutesEarly
+      const entry = dateEntries[dateKey]
+      
+      // Count leave days (excluding weekends)
+      if (entry && entry.status === 'leave' && !isWeekend(date)) {
+        leaveCount++
+      }
+      
+      // Only calculate attendance metrics for working days
+      if (entry && entry.status === 'working') {
+        const metrics = calculateDayMetrics(dateKey)
+        totalMinutesLate += metrics.minutesLate
+        totalMinutesEarly += metrics.minutesEarly
+      }
     })
 
-    // Bonus calculation: if total minutes late >= 180, bonus = 0, otherwise 2500
-    const bonus = totalMinutesLate >= 180 ? 0 : 2500
+    // Attendance bonus: if total minutes late >= 180, bonus = 0, otherwise 2500
+    const attendanceBonus = totalMinutesLate >= 180 ? 0 : 2500
 
+    // No leave bonus: if leaveCount === 0, bonus = 2500, otherwise 0
+    const noLeaveBonus = leaveCount === 0 ? 2500 : 0
+
+    // Total bonus is sum of both bonuses
+    const totalBonus = attendanceBonus + noLeaveBonus
+
+    // Leave deduction: first leave is free, each additional leave deducts Basic Pay / 30
     const basicPayNum = parseFloat(basicPay) || 0
-    const totalPay = basicPayNum + bonus
+    const leaveDeduction = Math.max(0, (leaveCount - 1)) * (basicPayNum / 30)
+    const totalPay = basicPayNum + totalBonus - leaveDeduction
 
     return {
       totalMinutesLate,
       totalMinutesEarly,
-      bonus,
+      attendanceBonus,
+      noLeaveBonus,
+      totalBonus,
+      leaveCount,
+      leaveDeduction,
       totalPay
     }
   }, [dates, dateEntries, basicPay])
@@ -222,6 +284,7 @@ function App() {
               <thead>
                 <tr>
                   <th>Date</th>
+                  <th>Status</th>
                   <th>Time In</th>
                   <th>Time Out</th>
                   <th>Minutes Late</th>
@@ -232,23 +295,45 @@ function App() {
               <tbody>
                 {dates.map(date => {
                   const dateKey = date.toISOString().split('T')[0]
-                  const entry = dateEntries[dateKey] || { timeIn: '9:30 AM', timeOut: '6:30 PM' }
+                  const entry = dateEntries[dateKey] || { 
+                    timeIn: '9:30 AM', 
+                    timeOut: '6:30 PM',
+                    status: isWeekend(date) ? 'off' : 'working'
+                  }
                   const metrics = calculateDayMetrics(dateKey)
                   const dateStr = date.toLocaleDateString('en-US', { 
                     month: 'short', 
                     day: 'numeric',
                     year: 'numeric'
                   })
+                  const isWeekendDay = isWeekend(date)
+                  const status = entry.status || (isWeekendDay ? 'off' : 'working')
 
                   return (
-                    <tr key={dateKey}>
+                    <tr key={dateKey} className={isWeekendDay ? 'weekend-row' : ''}>
                       <td>{dateStr}</td>
+                      <td>
+                        <select
+                          value={status}
+                          onChange={(e) => updateStatus(dateKey, e.target.value)}
+                          disabled={isWeekendDay}
+                          className={isWeekendDay ? 'disabled-select' : ''}
+                        >
+                          {STATUS_OPTIONS.map(option => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
                       <td>
                         <input
                           type="text"
                           value={entry.timeIn}
                           onChange={(e) => updateTimeEntry(dateKey, 'timeIn', e.target.value)}
                           placeholder="9:30 AM"
+                          disabled={status !== 'working'}
+                          className={status !== 'working' ? 'disabled-input' : ''}
                         />
                       </td>
                       <td>
@@ -257,6 +342,8 @@ function App() {
                           value={entry.timeOut}
                           onChange={(e) => updateTimeEntry(dateKey, 'timeOut', e.target.value)}
                           placeholder="6:30 PM"
+                          disabled={status !== 'working'}
+                          className={status !== 'working' ? 'disabled-input' : ''}
                         />
                       </td>
                       <td className={metrics.minutesLate > 0 ? 'late' : ''}>
@@ -278,16 +365,37 @@ function App() {
             <div className="summary-info">
               <p><strong>Total Minutes Late:</strong> {totals.totalMinutesLate} minutes</p>
               <p><strong>Total Minutes Early:</strong> {totals.totalMinutesEarly} minutes</p>
+              <p><strong>Leave Days:</strong> {totals.leaveCount} {totals.leaveCount === 1 ? 'day' : 'days'} {totals.leaveCount > 0 && `(1 paid leave allowed, ${Math.max(0, totals.leaveCount - 1)} additional ${Math.max(0, totals.leaveCount - 1) === 1 ? 'leave' : 'leaves'} charged)`}</p>
             </div>
             <div className="summary-pay">
               <div className="pay-row">
                 <span>Basic Pay:</span>
                 <span>Rs{parseFloat(basicPay || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
               </div>
-              <div className="pay-row">
-                <span>Bonus:</span>
-                <span>Rs{totals.bonus.toLocaleString('en-IN')}</span>
-              </div>
+              {totals.attendanceBonus > 0 && (
+                <div className="pay-row">
+                  <span>Attendance Bonus:</span>
+                  <span>Rs{totals.attendanceBonus.toLocaleString('en-IN')}</span>
+                </div>
+              )}
+              {totals.noLeaveBonus > 0 && (
+                <div className="pay-row">
+                  <span>No Leave Bonus:</span>
+                  <span>Rs{totals.noLeaveBonus.toLocaleString('en-IN')}</span>
+                </div>
+              )}
+              {totals.totalBonus > 0 && (
+                <div className="pay-row bonus-total">
+                  <span>Total Bonus:</span>
+                  <span>Rs{totals.totalBonus.toLocaleString('en-IN')}</span>
+                </div>
+              )}
+              {totals.leaveDeduction > 0 && (
+                <div className="pay-row deduction">
+                  <span>Leave Deduction:</span>
+                  <span>-Rs{totals.leaveDeduction.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                </div>
+              )}
               <div className="pay-row total">
                 <span>Total Pay:</span>
                 <span>Rs{totals.totalPay.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
